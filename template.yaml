@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: URL shortener with tracking-parameter stripping, on Lambda, S3 and API Gateway.
+
+Parameters:
+  AdminSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Shared secret the admin page sends with every write. Generate with "openssl rand -base64 32".
+  StageName:
+    Type: String
+    Default: prod
+    AllowedPattern: "[a-zA-Z0-9_-]+"
+    Description: API Gateway stage name.
+
+Resources:
+  LinkBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  LambdaExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LinkObjects
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # scoped to the u/ prefix: the functions never touch anything else
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${LinkBucket.Arn}/u/*"
+
+  ShortenerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.13
+      Timeout: 10
+      Role: !GetAtt LambdaExecRole.Arn
+      Code: src/shortener
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref LinkBucket
+          ADMIN_SECRET: !Ref AdminSecret
+
+  RedirectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.13
+      Timeout: 5
+      Role: !GetAtt LambdaExecRole.Arn
+      Code: src/redirector
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref LinkBucket
+
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref AWS::StackName
+      EndpointConfiguration:
+        Types:
+          - EDGE
+
+  # ---------- GET /admin : the admin page, served from a mock integration ----------
+
+  AdminResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: admin
+
+  AdminMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref AdminResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Content-Type: true
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Content-Type: "'text/html'"
+            ResponseTemplates:
+              # placeholder only. deploy.sh writes src/web/admin.html in here,
+              # so the page can be changed without a stack update.
+              application/json: "<!doctype html><title>Not deployed</title>Run deploy.sh"
+
+  # ---------- POST /admin_shrink_url : create and rename links ----------
+
+  ShrinkResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: admin_shrink_url
+
+  ShrinkMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref ShrinkResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: "200"
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ShortenerFunction.Arn}/invocations"
+        IntegrationResponses:
+          - StatusCode: "200"
+
+  ShortenerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ShortenerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/admin_shrink_url"
+
+  # ---------- GET /{key} : the redirect ----------
+
+  KeyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: "{key}"
+
+  KeyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref KeyResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.key: true
+      MethodResponses:
+        - StatusCode: "302"
+          ResponseParameters:
+            method.response.header.Location: true
+        - StatusCode: "404"
+          ResponseParameters:
+            method.response.header.Content-Type: true
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RedirectorFunction.Arn}/invocations"
+        PassthroughBehavior: NEVER
+        RequestTemplates:
+          application/json: '{ "Key": "$input.params(''key'')" }'
+        IntegrationResponses:
+          - StatusCode: "302"
+            ResponseParameters:
+              method.response.header.Location: integration.response.body.Redirect
+          # the function raises NotFound for an unknown key. without this the
+          # caller gets a python traceback carrying the bucket name.
+          - StatusCode: "404"
+            SelectionPattern: ".*NotFound.*"
+            ResponseParameters:
+              method.response.header.Content-Type: "'text/html'"
+            ResponseTemplates:
+              application/json: "<!doctype html><title>Not found</title><h1>404</h1><p>No such short link.</p>"
+
+  RedirectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RedirectorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/GET/*"
+
+  # ---------- stage ----------
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - AdminMethod
+      - ShrinkMethod
+      - KeyMethod
+    Properties:
+      RestApiId: !Ref Api
+
+  Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref Deployment
+      StageName: !Ref StageName
+
+Outputs:
+  BaseUrl:
+    Description: Root of the API. Short links hang off this.
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  AdminUrl:
+    Description: The admin page.
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/admin"
+  BucketName:
+    Description: Bucket holding the redirect objects, under the u/ prefix.
+    Value: !Ref LinkBucket
+  ApiId:
+    Description: Needed by deploy.sh to push the admin page.
+    Value: !Ref Api

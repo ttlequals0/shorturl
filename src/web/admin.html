@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Private URL shortener</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <style>
+    :root {
+        --bg: #15171c;
+        --panel: #1d2026;
+        --border: #2e323b;
+        --text: #e6e8ec;
+        --muted: #979da8;
+        --accent: #4a9d5f;
+        --accent-hi: #5cb373;
+        --danger: #e0796f;
+    }
+    * { box-sizing: border-box; }
+    html { color-scheme: dark; }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .container { max-width: 760px; margin: 0 auto; padding: 40px 20px 80px; }
+    h1 { font-size: 26px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+    h4 {
+        font-size: 12px; font-weight: 600; margin: 0 0 14px;
+        color: var(--muted); text-transform: uppercase; letter-spacing: .07em;
+    }
+    hr { border: 0; border-top: 1px solid var(--border); margin: 34px 0; }
+    .form-group { margin-bottom: 18px; }
+    .form-control {
+        display: block; width: 100%;
+        padding: 10px 12px; margin-bottom: 8px;
+        background: var(--panel); color: var(--text);
+        border: 1px solid var(--border); border-radius: 6px;
+        font-size: 14px; font-family: inherit;
+    }
+    .form-control::placeholder { color: #6f7680; }
+    .form-control:focus {
+        outline: none; border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(74, 157, 95, .22);
+    }
+    .form-control[readonly] { color: var(--muted); }
+    .has-error .form-control { border-color: #b4483f; }
+    .checkbox { margin: 10px 0; }
+    .checkbox label {
+        display: flex; gap: 9px; align-items: flex-start;
+        color: var(--muted); font-size: 13.5px; cursor: pointer;
+    }
+    .checkbox input { margin: 3px 0 0; accent-color: var(--accent); flex: none; }
+    .help-block { margin-top: 8px; color: var(--danger); font-size: 13.5px; }
+    .btn {
+        display: inline-block; padding: 9px 18px;
+        border: 1px solid transparent; border-radius: 6px;
+        font-size: 14px; font-family: inherit; cursor: pointer;
+    }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .btn-success { background: var(--accent); color: #fff; }
+    .btn-success:hover:enabled { background: var(--accent-hi); }
+    .btn-primary { background: #3a6ea5; color: #fff; }
+    .btn-primary:hover:enabled { background: #4780bd; }
+    .btn-default { background: #272b33; color: var(--text); border-color: var(--border); }
+    .btn-default:hover:enabled { background: #30353f; }
+    .alert {
+        padding: 14px 16px; margin-bottom: 16px;
+        border: 1px solid var(--border); border-left-width: 3px;
+        border-radius: 6px; background: var(--panel); font-size: 14px;
+        /* the pasted URL is one long token with no spaces, so it needs an
+           explicit break or it runs past the edge of the panel */
+        overflow-wrap: anywhere; word-break: break-word;
+    }
+    .alert-success { border-left-color: var(--accent); }
+    .alert-warning { border-left-color: #c79340; color: #e8c88a; }
+    #url_long {
+        display: inline-block; margin-top: 6px; color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    }
+    #result label { display: block; margin-bottom: 8px; font-weight: 600; font-size: 13.5px; }
+    .input-group { display: flex; }
+    .input-group .form-control {
+        margin-bottom: 0; border-radius: 6px 0 0 6px; border-right: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .input-group-btn .btn { border-radius: 0 6px 6px 0; border-color: var(--border); }
+    #auth-group { margin-bottom: 26px; }
+    #page_reload { margin-top: 10px; }
+    .subtitle { color: var(--muted); font-size: 13.5px; margin: 0 0 30px; }
+    </style>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.4/jquery.min.js"></script>
+    <script type="text/javascript">
+
+    $(document).ready(function() {
+
+        // used only to allow local serving of files
+        $.ajaxSetup({
+            beforeSend: function(xhr) {
+                if (xhr.overrideMimeType) {
+                    xhr.overrideMimeType("application/json");
+                }
+            }
+        });
+
+        var SECRET_STORE = 'shorturl_admin_secret';
+
+        function loadSecret() {
+            try {
+                var v = window.localStorage.getItem(SECRET_STORE);
+                if (v) {
+                    $('#admin_secret').val(v);
+                    $('#remember_secret').prop('checked', true);
+                }
+            } catch (e) {}
+        }
+
+        function secret() {
+            var v = $('#admin_secret').val();
+            try {
+                if ($('#remember_secret').is(':checked')) {
+                    window.localStorage.setItem(SECRET_STORE, v);
+                } else {
+                    window.localStorage.removeItem(SECRET_STORE);
+                }
+            } catch (e) {}
+            return v;
+        }
+
+        loadSecret();
+
+        $('#url_input').focus();    // set initial focus
+
+        function showResult(data) {
+            $('form#submit').hide();
+            $('form#rename').hide();
+            $('#auth-group').hide();
+            $('form#result').show();
+            $('#url_long').text(data.url_long);
+            $('#url_short').val(data.url_short).focus().select();
+            if (data.note) {
+                $('#note').show().text(data.note);
+            } else {
+                $('#note').hide();
+            }
+        }
+
+        function showError(group, target, message) {
+            $(group).addClass('has-error');
+            $(target).show().text(message);
+        }
+
+        function post(payload, buttons, group, target) {
+            $(buttons).prop('disabled', true);
+            $(group).removeClass('has-error');
+            $(target).hide();
+
+            $.ajax({
+                type        : 'POST',
+                url         : '/admin_shrink_url',
+                data        : JSON.stringify(payload),
+                contentType : 'application/json; charset=utf-8',
+                dataType    : 'json',
+                encode      : true
+            })
+            .done(function(data, textStatus, jqXHR) {
+                $(buttons).prop('disabled', false);
+                var failure = data.error || data.errorMessage;
+                if (failure) {
+                    showError(group, target, failure);
+                } else {
+                    showResult(data);
+                }
+            })
+            .fail(function(jqXHR, textStatus, errorThrown) {
+                $(buttons).prop('disabled', false);
+                showError(group, target, "Server error: " + errorThrown);
+            });
+        }
+
+        $('form#submit').submit(function(event) {
+            event.preventDefault();
+            post({
+                'secret'     : secret(),
+                'url_long'   : $('#url_input').val(),
+                'custom_key' : $('#custom_key').val(),
+                'overwrite'  : $('#overwrite').is(':checked'),
+                'keep_tracking' : $('#keep_tracking').is(':checked'),
+                'cdn_prefix' : window.location.hostname
+            }, '#url_input_submit', '#url-group', '#url-error');
+        });
+
+        $('form#rename').submit(function(event) {
+            event.preventDefault();
+            post({
+                'secret'      : secret(),
+                'rename_from' : $('#rename_from').val(),
+                'custom_key'  : $('#rename_to').val(),
+                'overwrite'   : $('#rename_overwrite').is(':checked'),
+                'cdn_prefix'  : window.location.hostname
+            }, '#rename_submit', '#rename-group', '#rename-error');
+        });
+
+        $('#copy_btn').click(function(event) {
+            event.preventDefault();
+            var input = document.getElementById('url_short');
+            input.focus();
+            input.select();
+            var flash = function() {
+                var btn = $('#copy_btn');
+                btn.text('Copied').addClass('btn-success').removeClass('btn-default');
+                setTimeout(function() {
+                    btn.text('Copy').addClass('btn-default').removeClass('btn-success');
+                }, 1500);
+            };
+            var fallback = function() {
+                try { document.execCommand('copy'); } catch (e) {}
+                flash();
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(input.value).then(flash, fallback);
+            } else {
+                fallback();
+            }
+        });
+
+        $('form#result').submit(function(event) {
+            location.reload();
+        });
+
+    });
+    </script>
+</head>
+<body>
+<div class="container">
+
+    <h1>Private URL shortener</h1>
+    <p class="subtitle">Tracking and referral parameters are stripped unless you say otherwise.</p>
+    <div id="auth-group" class="form-group">
+        <input type="password" class="form-control" placeholder="Admin secret" id="admin_secret">
+        <div class="checkbox"><label><input type="checkbox" id="remember_secret"> Remember the secret in this browser</label></div>
+    </div>
+    <form id="submit">
+        <div id="url-group" class="form-group">
+            <input type="url" required class="form-control" name="url" placeholder="Paste the long URL here" id="url_input">
+            <input type="text" class="form-control" name="custom_key" placeholder="Optional friendly name, e.g. spring-sale (leave blank for a random one)" id="custom_key">
+            <div class="checkbox"><label><input type="checkbox" id="overwrite"> Overwrite the name if it is already taken (otherwise a random name is used)</label></div>
+            <div class="checkbox"><label><input type="checkbox" id="keep_tracking"> Keep tracking parameters (utm_*, fbclid, affiliate tags and the like are stripped by default)</label></div>
+            <div class="help-block" style="display: none" id="url-error"></div>
+        </div>
+        <button type="submit" class="btn btn-success" id="url_input_submit">Shorten</button>
+
+    </form>
+    <hr/>
+    <form id="rename">
+        <h4>Rename an existing link</h4>
+        <div id="rename-group" class="form-group">
+            <input type="text" required class="form-control" name="rename_from" placeholder="Current name, e.g. a1b2c3d" id="rename_from">
+            <input type="text" required class="form-control" name="rename_to" placeholder="New friendly name, e.g. spring-sale" id="rename_to">
+            <div class="checkbox"><label><input type="checkbox" id="rename_overwrite"> Overwrite the new name if it is already taken</label></div>
+            <div class="help-block" style="display: none" id="rename-error"></div>
+        </div>
+        <button type="submit" class="btn btn-primary" id="rename_submit">Rename</button>
+    </form>
+    <form id="result" style="display: none">
+        <div class="alert alert-success">Successfully shortened: <br/><span id="url_long"></span></div>
+        <div class="alert alert-warning" style="display: none" id="note"></div>
+        <div class="form-group">
+            <label for="name">You can now copy/paste the short URL</label>
+            <div class="input-group">
+                <input type="text" class="form-control" name="url" readonly="readonly" id="url_short">
+                <span class="input-group-btn"><button class="btn btn-default" type="button" id="copy_btn">Copy</button></span>
+            </div>
+        </div><button type="submit" class="btn btn-success" id="page_reload">New URL</button><div>
+        </div>
+    </form>
+
+</div>
+</body>
+</html>
