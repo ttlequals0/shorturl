@@ -152,3 +152,7 @@ origin body is exactly the byte count of `src/web/admin.html`.
 - The admin page is public. Anyone can load it; they just cannot write.
 - Bot protection on a proxy in front of this will challenge non-browser clients
   and break link unfurls in chat apps.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
