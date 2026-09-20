@@ -37,6 +37,10 @@ It creates a bucket for the packaged code, deploys the stack, pushes
 `src/web/admin.html` into the `/admin` integration response, and prints the
 URLs. On a first deploy it generates an admin secret and prints it once.
 
+The stack mirrors a deployment that has been running in production, and the
+template validates, but it has not been raised from scratch. Open an issue if a
+fresh deploy trips on something.
+
 | Variable | Default |
 |---|---|
 | `STACK_NAME` | `shorturl` |
